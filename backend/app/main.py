@@ -42,6 +42,49 @@ class EdgeRequest(BaseModel):
     concepts: list[Concept]
 
 
+class GraphRequest(BaseModel):
+    nodes: list[Concept]
+    edges: list[Edge]
+
+
+class QuizQuestion(BaseModel):
+    concept_id: str
+    question: str
+    options: list[str]
+    correct_index: int
+
+
+class QuizResponseQuestion(BaseModel):
+    concept_id: str
+    question: str
+    options: list[str]
+
+
+class QuizAnswer(BaseModel):
+    concept_id: str
+    selected_index: int
+
+
+class QuizAnswerRequest(BaseModel):
+    answers: list[QuizAnswer]
+
+
+class PathStep(BaseModel):
+    concept_id: str
+    priority: str
+    reason: str
+
+
+class PathRequest(GraphRequest):
+    status: dict[str, str]
+
+
+# This is intentionally short-lived, in-memory quiz state for a local demo.
+# A production deployment would associate this with a user/session in a database.
+latest_quiz: dict[str, QuizQuestion] = {}
+latest_quiz_concepts: set[str] = set()
+
+
 def clean_json(value: str) -> Any:
     """Extract and decode JSON even when a model has wrapped it in a code fence."""
     value = re.sub(r"^\s*```(?:json)?\s*|\s*```\s*$", "", value.strip(), flags=re.I)
@@ -55,7 +98,7 @@ def clean_json(value: str) -> Any:
         return decoder.raw_decode(value[start:])[0]
 
 
-async def ask_llm(prompt: str) -> Any:
+async def ask_llm(prompt: str, response_schema: dict[str, Any] | None = None) -> Any:
     """Use Gemini or Anthropic and retry once when the returned JSON is malformed."""
     provider = "gemini" if os.getenv("GEMINI_API_KEY") else "anthropic" if os.getenv("ANTHROPIC_API_KEY") else None
     if not provider:
@@ -68,10 +111,13 @@ async def ask_llm(prompt: str) -> Any:
             try:
                 if provider == "gemini":
                     model = os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite")
+                    generation_config: dict[str, Any] = {"responseMimeType": "application/json"}
+                    if response_schema:
+                        generation_config["responseSchema"] = response_schema
                     response = await client.post(
                         f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
                         params={"key": os.environ["GEMINI_API_KEY"]},
-                        json={"contents": [{"parts": [{"text": prompt + retry_note}]}], "generationConfig": {"responseMimeType": "application/json"}},
+                        json={"contents": [{"parts": [{"text": prompt + retry_note}]}], "generationConfig": generation_config},
                     )
                     response.raise_for_status()
                     text = response.json()["candidates"][0]["content"]["parts"][0]["text"]
@@ -91,6 +137,10 @@ async def ask_llm(prompt: str) -> Any:
                 # before surfacing the provider's message to the student.
                 if isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code in {429, 500, 502, 503, 504} and attempt < 2:
                     await asyncio.sleep(1.5 * (attempt + 1))
+                    continue
+                # Models occasionally wrap or truncate structured output. Give
+                # malformed JSON one explicit correction attempt as promised.
+                if not isinstance(exc, httpx.HTTPError) and attempt < 1:
                     continue
                 break
     if isinstance(last_error, httpx.HTTPStatusError):
@@ -169,6 +219,70 @@ The result MUST form one connected, top-to-bottom learning tree/DAG with exactly
     return valid
 
 
+def topological_order(nodes: list[Concept], edges: list[Edge]) -> list[str]:
+    ids = [node.id for node in nodes]
+    children = {concept_id: [] for concept_id in ids}
+    incoming = {concept_id: 0 for concept_id in ids}
+    for edge in edges:
+        if edge.from_ in children and edge.to in incoming:
+            children[edge.from_].append(edge.to)
+            incoming[edge.to] += 1
+    queue = [concept_id for concept_id in ids if incoming[concept_id] == 0]
+    ordered: list[str] = []
+    while queue:
+        current = queue.pop(0)
+        ordered.append(current)
+        for child in children[current]:
+            incoming[child] -= 1
+            if incoming[child] == 0:
+                queue.append(child)
+    # Keep an API response useful even if a malformed graph somehow contains a cycle.
+    return ordered + [concept_id for concept_id in ids if concept_id not in ordered]
+
+
+def quiz_concepts(nodes: list[Concept], edges: list[Edge]) -> list[Concept]:
+    if len(nodes) <= 10:
+        return nodes
+    incoming = {edge.to for edge in edges}
+    outgoing = {edge.from_ for edge in edges}
+    preferred = [node for node in nodes if node.id not in incoming or node.id not in outgoing]
+    chosen: list[Concept] = []
+    for concept in preferred + nodes:
+        if concept.id not in {item.id for item in chosen}:
+            chosen.append(concept)
+        if len(chosen) == 10:
+            break
+    return chosen
+
+
+async def question_for_concept(concept: Concept) -> QuizQuestion:
+    prompt = f'''Generate ONE short multiple-choice question that tests whether a student understands this concept.
+Concept: {concept.name}
+Description: {concept.short_description}
+Return ONLY valid JSON with exactly {{concept_id, question, options, correct_index}}. concept_id must be "{concept.id}". options must be exactly 4 concise strings. correct_index must be a zero-based integer from 0 to 3. Include exactly one correct option.'''
+    schema = {
+        "type": "OBJECT",
+        "properties": {
+            "concept_id": {"type": "STRING"},
+            "question": {"type": "STRING"},
+            "options": {"type": "ARRAY", "items": {"type": "STRING"}, "minItems": 4, "maxItems": 4},
+            "correct_index": {"type": "INTEGER", "minimum": 0, "maximum": 3},
+        },
+        "required": ["concept_id", "question", "options", "correct_index"],
+    }
+    last_error: Exception | None = None
+    for attempt in range(2):
+        try:
+            raw = await ask_llm(prompt + ("\nUse the required field names exactly." if attempt else ""), schema)
+            question = QuizQuestion.model_validate(raw)
+            if question.concept_id != concept.id or len(question.options) != 4 or question.correct_index not in range(4):
+                raise ValueError("Invalid quiz question")
+            return question
+        except (ValueError, HTTPException) as exc:
+            last_error = exc
+    raise HTTPException(502, "The AI could not produce a valid quiz question. Please try again.") from last_error
+
+
 @app.get("/health")
 async def health():
     return {"status": "ok"}
@@ -189,3 +303,48 @@ async def build_graph(text: Annotated[str | None, Form()] = None, file: Annotate
     concepts = await concepts_from_source(await get_source_text(text, file))
     edges = await edges_from_concepts(concepts)
     return {"nodes": [item.model_dump() for item in concepts], "edges": [item.model_dump(by_alias=True) for item in edges]}
+
+
+@app.post("/generate-quiz", response_model=list[QuizResponseQuestion])
+async def generate_quiz(request: GraphRequest):
+    global latest_quiz, latest_quiz_concepts
+    selected = quiz_concepts(request.nodes, request.edges)
+    questions = [await question_for_concept(concept) for concept in selected]
+    latest_quiz = {question.concept_id: question for question in questions}
+    latest_quiz_concepts = {concept.id for concept in request.nodes}
+    return [QuizResponseQuestion(concept_id=item.concept_id, question=item.question, options=item.options) for item in questions]
+
+
+@app.post("/evaluate-quiz")
+async def evaluate_quiz(request: QuizAnswerRequest):
+    if not latest_quiz:
+        raise HTTPException(409, "No active quiz was found. Generate a quiz and submit it before evaluating.")
+    status = {concept_id: "unknown" for concept_id in latest_quiz_concepts}
+    for answer in request.answers:
+        question = latest_quiz.get(answer.concept_id)
+        if question:
+            status[answer.concept_id] = "known" if answer.selected_index == question.correct_index else "gap"
+    return status
+
+
+@app.post("/generate-path", response_model=list[PathStep])
+async def generate_path(request: PathRequest):
+    order = topological_order(request.nodes, request.edges)
+    ids = {node.id for node in request.nodes}
+    normalized_status = {concept_id: request.status.get(concept_id, "unknown") for concept_id in ids}
+    prompt = """Given this concept dependency graph and this student's status per concept, generate an ordered personalized study path. Skip or briefly mention 'known' concepts, prioritize 'gap' concepts early when prerequisites allow, and order 'unknown' concepts by their topological position. Return ONLY valid JSON as an ordered list of objects {concept_id, priority, reason}. priority must be exactly one of 'skip', 'review', 'gap', or 'new'. Use every supplied concept exactly once. The order must respect the supplied topological order: a concept cannot appear before any prerequisite. reason is one clear sentence.\n\nTOPOLOGICAL ORDER:\n""" + json.dumps(order) + "\n\nCONCEPTS:\n" + json.dumps([node.model_dump() for node in request.nodes]) + "\n\nEDGES:\n" + json.dumps([edge.model_dump(by_alias=True) for edge in request.edges]) + "\n\nSTATUS:\n" + json.dumps(normalized_status)
+    raw = await ask_llm(prompt)
+    try:
+        candidate = [PathStep.model_validate(item) for item in raw]
+    except Exception as exc:
+        raise HTTPException(502, "The AI response did not contain a valid learning path. Please try again.") from exc
+    valid_priorities = {"skip", "review", "gap", "new"}
+    by_id = {item.concept_id: item for item in candidate if item.concept_id in ids and item.priority in valid_priorities}
+    proposed_order = [item.concept_id for item in candidate if item.concept_id in by_id]
+    is_complete = set(proposed_order) == ids and len(proposed_order) == len(ids)
+    positions = {concept_id: index for index, concept_id in enumerate(proposed_order)}
+    respects_edges = is_complete and all(positions[edge.from_] < positions[edge.to] for edge in request.edges if edge.from_ in positions and edge.to in positions)
+    if respects_edges:
+        return [by_id[concept_id] for concept_id in proposed_order]
+    fallback_priority = {"known": "skip", "gap": "gap", "unknown": "new"}
+    return [PathStep(concept_id=concept_id, priority=by_id.get(concept_id, PathStep(concept_id=concept_id, priority=fallback_priority.get(normalized_status[concept_id], "new"), reason="Follow this step in prerequisite order.")).priority, reason=by_id.get(concept_id, PathStep(concept_id=concept_id, priority="new", reason="Follow this step in prerequisite order.")).reason) for concept_id in order]
