@@ -121,7 +121,12 @@ async def get_source_text(text: str | None, file: UploadFile | None) -> str:
 
 
 async def concepts_from_source(source: str) -> list[Concept]:
-    prompt = '''From the following course material, extract the core concepts a student needs to learn. Return ONLY valid JSON: a list of objects with exactly {id, name, short_description}. IDs should be short lowercase slugs. Concepts must be atomic, distinct, and non-overlapping. Keep descriptions under 28 words.\n\nCOURSE MATERIAL:\n''' + source[:70000]
+    length_guidance = "Aim for 12–25 concepts" if len(source) > 1800 else "Aim for 8–16 concepts"
+    prompt = f'''From the following course material, build a comprehensive learning-concept inventory. Return ONLY valid JSON: a list of objects with exactly {{id, name, short_description}}. IDs should be short lowercase slugs.
+
+Include every meaningful learnable idea in the material: key definitions, entities/components, mechanisms and stages, methods/algorithms, formulas or principles, and explicitly discussed uses or outcomes. Do not collapse several named ideas into one vague umbrella concept just to make a smaller graph. Concepts must still be atomic, distinct, and non-overlapping; omit only trivial examples, repetition, and incidental wording. {length_guidance}, adjusting upward for genuinely dense material.
+
+Include one genuinely foundational real concept broad enough to be the single starting point of the learning path; do not split closely related basics into disconnected foundations. Keep each description under 28 words. Before answering, silently check that each major section of the source has representation in the list.\n\nCOURSE MATERIAL:\n''' + source[:70000]
     raw = await ask_llm(prompt)
     try:
         return [Concept.model_validate(item) for item in raw]
@@ -130,7 +135,9 @@ async def concepts_from_source(source: str) -> list[Concept]:
 
 
 async def edges_from_concepts(concepts: list[Concept]) -> list[Edge]:
-    prompt = """Given this list of concepts, determine prerequisite relationships. Return ONLY valid JSON: a list of objects {from, to, reason}. 'from' must be understood before 'to'; all IDs must be from the supplied list; reason is one clear sentence. Do not create cycles, duplicate edges, or an edge from a concept to itself.\n\nCONCEPTS:\n""" + json.dumps([item.model_dump() for item in concepts])
+    prompt = """Given this list of concepts, determine prerequisite relationships. Return ONLY valid JSON: a list of objects {from, to, reason}. 'from' must be understood before 'to'; all IDs must be from the supplied list; reason is one clear sentence.
+
+The result MUST form one connected, top-to-bottom learning tree/DAG with exactly ONE root concept: choose the most fundamental real concept from the supplied list, and ensure every other concept has a prerequisite path from that root. When concepts seem independent, connect them through the most accurate shared foundational concept rather than leaving a second root. Do not create cycles, duplicate edges, or an edge from a concept to itself.\n\nCONCEPTS:\n""" + json.dumps([item.model_dump() for item in concepts])
     raw = await ask_llm(prompt)
     ids = {item.id for item in concepts}
     try:
