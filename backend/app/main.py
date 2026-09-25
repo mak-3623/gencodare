@@ -57,12 +57,15 @@ class QuizQuestion(BaseModel):
     question: str
     options: list[str]
     correct_index: int
+    explanation: str
 
 
 class QuizResponseQuestion(BaseModel):
     concept_id: str
     question: str
     options: list[str]
+    correct_index: int
+    explanation: str
 
 
 class QuizAnswer(BaseModel):
@@ -262,11 +265,27 @@ def topological_order(nodes: list[Concept], edges: list[Edge]) -> list[str]:
 def quiz_concepts(nodes: list[Concept], edges: list[Edge]) -> list[Concept]:
     if len(nodes) <= 10:
         return nodes
-    incoming = {edge.to for edge in edges}
-    outgoing = {edge.from_ for edge in edges}
-    preferred = [node for node in nodes if node.id not in incoming or node.id not in outgoing]
+    by_id = {node.id: node for node in nodes}
+    ordered = topological_order(nodes, edges)
+    children = {node.id: [] for node in nodes}
+    incoming = {node.id: 0 for node in nodes}
+    depth = {node.id: 0 for node in nodes}
+    for edge in edges:
+        if edge.from_ in children and edge.to in incoming:
+            children[edge.from_].append(edge.to)
+            incoming[edge.to] += 1
+    for concept_id in ordered:
+        for child in children[concept_id]:
+            depth[child] = max(depth[child], depth[concept_id] + 1)
+
+    # A diagnostic should test foundations first, but also sample whether the
+    # learner can apply them. This avoids the old root/leaf-only blind spot.
+    foundations = sorted(ordered, key=lambda concept_id: (depth[concept_id], ordered.index(concept_id)))
+    branch_points = sorted(ordered, key=lambda concept_id: (-len(children[concept_id]), depth[concept_id]))
+    leaves = [concept_id for concept_id in ordered if not children[concept_id]]
     chosen: list[Concept] = []
-    for concept in preferred + nodes:
+    for concept_id in foundations[:4] + branch_points[:4] + leaves[:2] + ordered:
+        concept = by_id[concept_id]
         if concept.id not in {item.id for item in chosen}:
             chosen.append(concept)
         if len(chosen) == 10:
@@ -278,7 +297,7 @@ async def question_for_concept(concept: Concept) -> QuizQuestion:
     prompt = f'''Generate ONE short multiple-choice question that tests whether a student understands this concept.
 Concept: {concept.name}
 Description: {concept.short_description}
-Return ONLY valid JSON with exactly {{concept_id, question, options, correct_index}}. concept_id must be "{concept.id}". options must be exactly 4 concise strings. correct_index must be a zero-based integer from 0 to 3. Include exactly one correct option.'''
+Return ONLY valid JSON with exactly {{concept_id, question, options, correct_index, explanation}}. concept_id must be "{concept.id}". options must be exactly 4 concise strings. correct_index must be a zero-based integer from 0 to 3. explanation must briefly explain the correct answer in one sentence. Include exactly one correct option.'''
     schema = {
         "type": "OBJECT",
         "properties": {
@@ -286,8 +305,9 @@ Return ONLY valid JSON with exactly {{concept_id, question, options, correct_ind
             "question": {"type": "STRING"},
             "options": {"type": "ARRAY", "items": {"type": "STRING"}, "minItems": 4, "maxItems": 4},
             "correct_index": {"type": "INTEGER", "minimum": 0, "maximum": 3},
+            "explanation": {"type": "STRING"},
         },
-        "required": ["concept_id", "question", "options", "correct_index"],
+        "required": ["concept_id", "question", "options", "correct_index", "explanation"],
     }
     last_error: Exception | None = None
     for attempt in range(2):
@@ -340,7 +360,7 @@ async def generate_quiz(request: GraphRequest):
     questions = [await question_for_concept(concept) for concept in selected]
     latest_quiz = {question.concept_id: question for question in questions}
     latest_quiz_concepts = {concept.id for concept in request.nodes}
-    return [QuizResponseQuestion(concept_id=item.concept_id, question=item.question, options=item.options) for item in questions]
+    return [QuizResponseQuestion(concept_id=item.concept_id, question=item.question, options=item.options, correct_index=item.correct_index, explanation=item.explanation) for item in questions]
 
 
 @app.post("/evaluate-quiz")
