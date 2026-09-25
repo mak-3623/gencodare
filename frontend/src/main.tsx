@@ -3,6 +3,7 @@ import { createRoot } from 'react-dom/client'
 import { ReactFlow, Background, BackgroundVariant, Controls, MarkerType, MiniMap, type Edge, type Node, type NodeMouseHandler, type EdgeMouseHandler } from '@xyflow/react'
 import dagre from '@dagrejs/dagre'
 import '@xyflow/react/dist/style.css'
+// @ts-ignore
 import './styles.css'
 
 type Concept = { id: string; name: string; short_description: string; why_it_matters?: string; sources: string[] }
