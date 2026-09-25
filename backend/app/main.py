@@ -28,6 +28,7 @@ class Concept(BaseModel):
     id: str
     name: str
     short_description: str
+    sources: list[str] = Field(default_factory=list)
 
 
 class Edge(BaseModel):
@@ -40,6 +41,10 @@ class Edge(BaseModel):
 
 class EdgeRequest(BaseModel):
     concepts: list[Concept]
+
+
+class MergeConceptsRequest(BaseModel):
+    concept_lists: list[list[Concept]]
 
 
 class GraphRequest(BaseModel):
@@ -184,6 +189,20 @@ Include one genuinely foundational real concept broad enough to be the single st
         raise HTTPException(502, "The AI response did not contain valid concepts. Please try again.") from exc
 
 
+async def merge_concept_lists(concept_lists: list[list[Concept]]) -> list[Concept]:
+    prompt = """You are given concept lists extracted from multiple course sources. Some concepts are duplicates with different names, such as 'Recursion' and 'Recursive Functions'. Merge semantic duplicates into one concept while retaining distinct concepts. Combine descriptions concisely and preserve every original source label.
+
+Return ONLY valid JSON: a single deduplicated list of objects {id, name, short_description, sources}. IDs must be unique lowercase slugs; sources must be a non-empty list of source labels. Do not omit concepts merely because a source is shorter.\n\nCONCEPT LISTS:\n""" + json.dumps([[concept.model_dump() for concept in concepts] for concepts in concept_lists])
+    raw = await ask_llm(prompt)
+    try:
+        merged = [Concept.model_validate(item) for item in raw]
+        if not merged or len({concept.id for concept in merged}) != len(merged) or any(not concept.sources for concept in merged):
+            raise ValueError("Merged concepts must have unique IDs and sources")
+        return merged
+    except Exception as exc:
+        raise HTTPException(502, "The AI response did not contain valid merged concepts. Please try again.") from exc
+
+
 async def edges_from_concepts(concepts: list[Concept]) -> list[Edge]:
     prompt = """Given this list of concepts, determine prerequisite relationships. Return ONLY valid JSON: a list of objects {from, to, reason}. 'from' must be understood before 'to'; all IDs must be from the supplied list; reason is one clear sentence.
 
@@ -289,8 +308,17 @@ async def health():
 
 
 @app.post("/extract-concepts", response_model=list[Concept])
-async def extract_concepts(text: Annotated[str | None, Form()] = None, file: Annotated[UploadFile | None, File()] = None):
-    return await concepts_from_source(await get_source_text(text, file))
+async def extract_concepts(text: Annotated[str | None, Form()] = None, file: Annotated[UploadFile | None, File()] = None, source: Annotated[str | None, Form()] = None):
+    concepts = await concepts_from_source(await get_source_text(text, file))
+    source_name = source or (file.filename if file else "Pasted text") or "Pasted text"
+    return [concept.model_copy(update={"sources": [source_name]}) for concept in concepts]
+
+
+@app.post("/merge-concepts", response_model=list[Concept])
+async def merge_concepts(request: MergeConceptsRequest):
+    if not request.concept_lists or not any(request.concept_lists):
+        raise HTTPException(422, "Add at least one source with extracted concepts before merging.")
+    return await merge_concept_lists(request.concept_lists)
 
 
 @app.post("/extract-edges", response_model=list[Edge])
