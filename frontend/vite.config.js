@@ -11,6 +11,10 @@ export default defineConfig({
             '/generate-quiz': 'http://localhost:8000',
             '/evaluate-quiz': 'http://localhost:8000',
             '/generate-path': 'http://localhost:8000',
+            '/concept-explanation': 'http://localhost:8000',
+            '/retest-concept': 'http://localhost:8000',
+            '/evaluate-retest': 'http://localhost:8000',
+            '/health': 'http://localhost:8000',
         },
     },
 });

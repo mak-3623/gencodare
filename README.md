@@ -16,15 +16,15 @@ The interface is intentionally minimal: neutral surfaces, subtle borders, a sing
 
 ## Stack
 
-| Area | Technology |
-| --- | --- |
-| Frontend | React 18, TypeScript, Vite |
-| Styling | Tailwind CSS and focused custom CSS |
-| Graph rendering | [React Flow](https://reactflow.dev/) / `@xyflow/react` |
-| Graph layout | Dagre / `@dagrejs/dagre` |
-| Backend | Python, FastAPI, Pydantic |
-| PDF parsing | PyMuPDF / `fitz` |
-| AI | Gemini API by default; Anthropic Messages API is supported |
+| Area            | Technology                                                 |
+| --------------- | ---------------------------------------------------------- |
+| Frontend        | React 18, TypeScript, Vite                                 |
+| Styling         | Tailwind CSS and focused custom CSS                        |
+| Graph rendering | [React Flow](https://reactflow.dev/) / `@xyflow/react`     |
+| Graph layout    | Dagre / `@dagrejs/dagre`                                   |
+| Backend         | Python, FastAPI, Pydantic                                  |
+| PDF parsing     | PyMuPDF / `fitz`                                           |
+| AI              | Gemini API by default; Anthropic Messages API is supported |
 
 ## User workflow
 
@@ -84,14 +84,14 @@ The frontend runs Dagre to create a top-to-bottom layout and React Flow supplies
 
 ## API summary
 
-| Endpoint | Input | Output |
-| --- | --- | --- |
-| `POST /extract-concepts` | multipart `text` or PDF `file` | concept list |
-| `POST /extract-edges` | `{ concepts }` | dependency edge list |
-| `POST /build-graph` | multipart `text` or PDF `file` | `{ nodes, edges }` |
-| `POST /generate-quiz` | `{ nodes, edges }` | quiz questions (answers omitted) |
-| `POST /evaluate-quiz` | `{ answers }` | status map |
-| `POST /generate-path` | `{ nodes, edges, status }` | ordered learning steps |
+| Endpoint                 | Input                          | Output                           |
+| ------------------------ | ------------------------------ | -------------------------------- |
+| `POST /extract-concepts` | multipart `text` or PDF `file` | concept list                     |
+| `POST /extract-edges`    | `{ concepts }`                 | dependency edge list             |
+| `POST /build-graph`      | multipart `text` or PDF `file` | `{ nodes, edges }`               |
+| `POST /generate-quiz`    | `{ nodes, edges }`             | quiz questions (answers omitted) |
+| `POST /evaluate-quiz`    | `{ answers }`                  | status map                       |
+| `POST /generate-path`    | `{ nodes, edges, status }`     | ordered learning steps           |
 
 ## Run locally
 

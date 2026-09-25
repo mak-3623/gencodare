@@ -88,6 +88,42 @@ class PathRequest(GraphRequest):
     status: dict[str, str]
 
 
+class ConceptExplanationRequest(BaseModel):
+    concept_id: str
+    name: str = ""
+    description: str = ""
+
+
+class ConceptExplanationResponse(BaseModel):
+    concept_id: str
+    explanation: str
+    study_tip: str
+
+
+class RetestConceptRequest(BaseModel):
+    concept_id: str
+    name: str = ""
+    description: str = ""
+
+
+class RetestQuestionResponse(BaseModel):
+    concept_id: str
+    question: str
+    options: list[str]
+    correct_index: int
+
+
+class RetestConceptResponse(BaseModel):
+    concept_id: str
+    questions: list[RetestQuestionResponse]
+
+
+class RetestEvaluationRequest(BaseModel):
+    concept_id: str
+    selected_index: int
+    correct_index: int
+
+
 # This is intentionally short-lived, in-memory quiz state for a local demo.
 # A production deployment would associate this with a user/session in a database.
 latest_quiz: dict[str, QuizQuestion] = {}
@@ -374,6 +410,74 @@ async def evaluate_quiz(request: QuizAnswerRequest):
         if question:
             status[answer.concept_id] = "known" if answer.selected_index == question.correct_index else "gap"
     return status
+
+
+@app.post("/concept-explanation", response_model=ConceptExplanationResponse)
+async def concept_explanation(request: ConceptExplanationRequest):
+    concept_name = request.name.strip() or request.concept_id.replace("-", " ").title()
+    description = request.description.strip() or "This concept is part of the learning graph."
+    prompt = f'''Explain this concept simply for a student who is struggling with it: {concept_name} — {description}. Keep it short (3-5 sentences), clear, and encouraging. Then suggest ONE concrete way to practice or study it further.
+Return ONLY valid JSON with exactly {{concept_id, explanation, study_tip}}. concept_id must be "{request.concept_id}". explanation must be 3-5 sentences. study_tip must be a single clear suggestion.
+'''
+    schema = {
+        "type": "OBJECT",
+        "properties": {
+            "concept_id": {"type": "STRING"},
+            "explanation": {"type": "STRING"},
+            "study_tip": {"type": "STRING"},
+        },
+        "required": ["concept_id", "explanation", "study_tip"],
+    }
+    try:
+        raw = await ask_llm(prompt, schema)
+        response = ConceptExplanationResponse.model_validate(raw)
+        return response
+    except Exception as exc:
+        raise HTTPException(502, "The AI could not produce a useful explanation. Please try again.") from exc
+
+
+@app.post("/retest-concept", response_model=RetestConceptResponse)
+async def retest_concept(request: RetestConceptRequest):
+    concept_name = request.name.strip() or request.concept_id.replace("-", " ").title()
+    description = request.description.strip() or "This concept is part of the learning graph."
+    prompt = f'''Generate exactly 3 different multiple-choice questions for this concept. Each question should test deeper understanding, not just recall, and should vary across real-world application, cause/effect, comparison, or common misconception angles. Concept: {concept_name}. Description: {description}. 
+Return ONLY valid JSON as an array of exactly 3 objects with exactly {{concept_id, question, options, correct_index}}. concept_id must be "{request.concept_id}" for every item. Each options array must contain exactly 4 concise strings. correct_index must be a zero-based integer from 0 to 3 for every item.
+'''
+    schema = {
+        "type": "ARRAY",
+        "items": {
+            "type": "OBJECT",
+            "properties": {
+                "concept_id": {"type": "STRING"},
+                "question": {"type": "STRING"},
+                "options": {"type": "ARRAY", "items": {"type": "STRING"}, "minItems": 4, "maxItems": 4},
+                "correct_index": {"type": "INTEGER", "minimum": 0, "maximum": 3},
+            },
+            "required": ["concept_id", "question", "options", "correct_index"],
+        },
+        "minItems": 3,
+        "maxItems": 3,
+    }
+    try:
+        raw = await ask_llm(prompt, schema)
+        if not isinstance(raw, list):
+            raise ValueError("Retest response must be a list of questions.")
+        questions = [RetestQuestionResponse.model_validate(item) for item in raw]
+        if len(questions) != 3 or any(len(question.options) != 4 or question.correct_index not in range(4) for question in questions):
+            raise ValueError("Retest questions must include exactly three valid items.")
+        return RetestConceptResponse(concept_id=request.concept_id, questions=questions)
+    except Exception as exc:
+        raise HTTPException(502, "The AI could not produce a valid retest set. Please try again.") from exc
+
+
+@app.post("/evaluate-retest")
+async def evaluate_retest(request: RetestEvaluationRequest):
+    if request.selected_index not in range(4):
+        raise HTTPException(422, "The selected answer index is invalid.")
+    if request.correct_index not in range(4):
+        raise HTTPException(422, "The correct answer index is invalid.")
+    status = "known" if request.selected_index == request.correct_index else "gap"
+    return {"status": status}
 
 
 @app.post("/generate-path", response_model=list[PathStep])
