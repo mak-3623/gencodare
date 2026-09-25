@@ -28,6 +28,7 @@ class Concept(BaseModel):
     id: str
     name: str
     short_description: str
+    why_it_matters: str = ""
     sources: list[str] = Field(default_factory=list)
 
 
@@ -180,11 +181,11 @@ async def get_source_text(text: str | None, file: UploadFile | None) -> str:
 
 async def concepts_from_source(source: str) -> list[Concept]:
     length_guidance = "Aim for 12–25 concepts" if len(source) > 1800 else "Aim for 8–16 concepts"
-    prompt = f'''From the following course material, build a comprehensive learning-concept inventory. Return ONLY valid JSON: a list of objects with exactly {{id, name, short_description}}. IDs should be short lowercase slugs.
+    prompt = f'''From the following course material, build a comprehensive learning-concept inventory. Return ONLY valid JSON: a list of objects with exactly {{id, name, short_description, why_it_matters}}. IDs should be short lowercase slugs.
 
 Include every meaningful learnable idea in the material: key definitions, entities/components, mechanisms and stages, methods/algorithms, formulas or principles, and explicitly discussed uses or outcomes. Do not collapse several named ideas into one vague umbrella concept just to make a smaller graph. Concepts must still be atomic, distinct, and non-overlapping; omit only trivial examples, repetition, and incidental wording. {length_guidance}, adjusting upward for genuinely dense material.
 
-Include one genuinely foundational real concept broad enough to be the single starting point of the learning path; do not split closely related basics into disconnected foundations. Keep each description under 28 words. Before answering, silently check that each major section of the source has representation in the list.\n\nCOURSE MATERIAL:\n''' + source[:70000]
+Include one genuinely foundational real concept broad enough to be the single starting point of the learning path; do not split closely related basics into disconnected foundations. Keep each description under 28 words. why_it_matters must be one specific, student-friendly sentence explaining the practical or conceptual value of learning that concept; do not mention graph order or use generic wording. Before answering, silently check that each major section of the source has representation in the list.\n\nCOURSE MATERIAL:\n''' + source[:70000]
     raw = await ask_llm(prompt)
     try:
         return [Concept.model_validate(item) for item in raw]
@@ -195,7 +196,7 @@ Include one genuinely foundational real concept broad enough to be the single st
 async def merge_concept_lists(concept_lists: list[list[Concept]]) -> list[Concept]:
     prompt = """You are given concept lists extracted from multiple course sources. Some concepts are duplicates with different names, such as 'Recursion' and 'Recursive Functions'. Merge semantic duplicates into one concept while retaining distinct concepts. Combine descriptions concisely and preserve every original source label.
 
-Return ONLY valid JSON: a single deduplicated list of objects {id, name, short_description, sources}. IDs must be unique lowercase slugs; sources must be a non-empty list of source labels. Do not omit concepts merely because a source is shorter.\n\nCONCEPT LISTS:\n""" + json.dumps([[concept.model_dump() for concept in concepts] for concepts in concept_lists])
+Return ONLY valid JSON: a single deduplicated list of objects {id, name, short_description, why_it_matters, sources}. IDs must be unique lowercase slugs; sources must be a non-empty list of source labels. why_it_matters must retain or concisely combine the specific learning value from duplicate concepts. Do not omit concepts merely because a source is shorter.\n\nCONCEPT LISTS:\n""" + json.dumps([[concept.model_dump() for concept in concepts] for concepts in concept_lists])
     raw = await ask_llm(prompt)
     try:
         merged = [Concept.model_validate(item) for item in raw]
